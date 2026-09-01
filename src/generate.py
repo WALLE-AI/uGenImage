@@ -7,7 +7,7 @@ from torchvision.utils import save_image
 
 from inference import generate_autoregressive
 from models.transformer.model import VisualTransformer
-from models.vqgan.vqgan import VQGAN
+from models.vqgan.vqgan import build_vqgan_from_config
 
 DOWNSAMPLE = 16  # Encoder 4 级 stride-2
 
@@ -42,8 +42,7 @@ def main():
     v_cfg = v_ckpt.get('config', {}) or {}
     image_size = v_cfg.get('data', {}).get('image_size', 256)
     codebook_size = v_cfg.get('model', {}).get('codebook_size', 1024)
-    vqgan = VQGAN(image_size, codebook_size,
-                  v_cfg.get('model', {}).get('embedding_dim', 256)).to(device)
+    vqgan = build_vqgan_from_config(v_cfg).to(device)
     vqgan.load_state_dict(v_ckpt.get('model', v_ckpt), strict=True)
     vqgan.eval()
 

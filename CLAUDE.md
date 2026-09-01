@@ -15,10 +15,22 @@ banner. Do not run it; do not edit it as a way of editing the model code. See `P
 
 | 文件 | 内容 |
 |---|---|
+| `TRAINING.md` | **训练技术文档**：四阶段流程、配置全表、实测性能、实验记录、指标判读、故障排查 |
 | `SCHEME_A_BASELINE.md` | 方案 A（当前实现）的完整规格、参数量核算、10 项结构性缺陷 |
 | `SCHEME_B_OPTIMIZED.md` | 方案 B（优化设计）：FSQ tokenizer、掩码并行、条件化+CFG、规模阶梯 |
 | `PLAN.md` | 工程路线 P0–P3 与待决策项 D1–D6 |
-| `src/README.md` | 使用说明 |
+| `src/README.md` | 快速上手 |
+
+## 当前训练基线（2026-09-01 实测）
+
+| 组件 | 指标 | 值 |
+|---|---|---|
+| Tokenizer（4万步/48万张，53min） | val PSNR / 码字使用 / 码本熵 | 18.8 dB / **6.15%** / 5.37 bit |
+| Prior 1.32B（4000步/12万条，1h） | val_ppl | 10.51 |
+
+**瓶颈是 tokenizer**：每张 256×256 图只携带 172 字节（压缩比 1143:1）。
+码本使用率 6.15% 且增速已衰减到 1/8，加数据的边际收益很小 —— 需改结构（码本降维/EMA/LPIPS）。
+详见 `TRAINING.md` 第 6、11 节。
 
 ## Layout
 
