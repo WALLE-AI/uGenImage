@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# 训练产物
+checkpoints/
+outputs/
+runs/
+wandb/
+*.pth
+*.ckpt
+
+# 数据
+data/
+src/data/
+*.npy

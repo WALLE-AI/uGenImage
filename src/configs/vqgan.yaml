@@ -1,0 +1,41 @@
+# 阶段 1：VQGAN(实为 VQ-VAE) 训练配置
+# 本文件是超参的唯一真相。覆盖单个值：
+#   python train_vqgan.py --config configs/vqgan.yaml --set train.lr=5e-5 data.batch_size=64
+
+data:
+  # 本机已有约 48 万张 >=256px 的 LAION 图片，无需下载
+  image_dir: /home/dataset0/images/ALLaVA-4V/allava_laion/image_chunks/images
+  image_size: 256
+  batch_size: 32          # 全局 batch（DDP 下会按进程数均分）
+  num_workers: 16
+  val_size: 2000
+  limit: null             # 设成整数可只用前 N 张快速试跑
+  recursive: false
+
+model:
+  codebook_size: 1024
+  embedding_dim: 256
+
+train:
+  run_dir: runs/vqgan
+  max_steps: 200000
+  lr: 1.0e-4              # 原 yaml 的 4.5e-6 是带判别器时的配置，本实现无判别器
+  weight_decay: 0.01
+  lr_schedule: cosine     # cosine | constant
+  warmup_steps: 2000
+  min_lr_ratio: 0.1
+  grad_clip: 1.0
+  amp: true
+  ema_decay: null         # 例如 0.999 开启 EMA
+  seed: 0
+  resume: auto            # auto = 自动接上 run_dir/ckpt/latest.pt；也可填具体路径
+  log_every: 100
+  eval_every: 2000
+  eval_batches: 30
+  save_every: 5000
+  keep_last: 3
+  save_weights_only: false  # true = 只存权重(体积 1/3)，但无法续训
+  tensorboard: false
+
+# 训练时重点盯 codebook_usage：本实现无 EMA、无死码复活，坍塌风险高。
+# 若使用率持续低于 10%，说明码本已坍塌，继续训练没有意义（见 SCHEME_B_OPTIMIZED.md B.2.2）。
