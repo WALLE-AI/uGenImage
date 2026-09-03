@@ -1,0 +1,51 @@
+# Prior 配置 · P1 修正版（OPTIMIZATION_PLAN.md 阶段 P1）
+# 相对 configs/transformer.yaml 的改动：
+#   n_heads*head_dim = dim（原 3072 != 2048）| MHA 取代 GQA | SwiGLU 回到 8/3
+#   QK-norm | 2D RoPE | 解绑输出头 | 规模配平（原标称 0.39B 实为 1.32B）
+# vocab_size 需与 tokenizer 的码本大小一致：16384 + 3 个特殊 token
+
+data:
+  token_dir: data/tokens_full
+  batch_size: 64
+  num_workers: 8
+  val_size: 2000
+  limit: null
+
+model:
+  dim: 1280
+  n_layers: 20
+  n_heads: 16             # 16 x 80 = 1280 = dim
+  n_kv_heads: 16          # == n_heads 即 MHA；seq 257 下 GQA 纯损质量
+  head_dim: 80
+  vocab_size: 16387       # 16384 码本 + PAD/BOS/MASK
+  seq_len: 257            # BOS + 16x16
+  latent_size: 16
+  rope: 2d
+  qk_norm: true
+  swiglu_expansion: null  # 用标准 8/3
+  tie_embeddings: false
+  init_std: 0.02
+
+train:
+  run_dir: runs/prior_p1
+  max_steps: 100000
+  lr: 3.0e-4
+  weight_decay: 0.1
+  lr_schedule: cosine
+  warmup_steps: 2000
+  min_lr_ratio: 0.1
+  grad_clip: 1.0
+  grad_accum: 1
+  mask_ratio: 0.2
+  mask_prob: 0.15
+  amp: true
+  ema_decay: null
+  seed: 0
+  resume: auto
+  log_every: 50
+  eval_every: 1000
+  eval_batches: 20
+  save_every: 5000
+  keep_last: 2
+  save_weights_only: false
+  tensorboard: false

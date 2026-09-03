@@ -18,6 +18,12 @@ model:
   vocab_size: 1027        # 与 constants.py 保持一致：PAD+BOS+MASK+1024
   seq_len: 257            # BOS + 16x16
   init_std: 0.02          # null = 复现原行为(nn.Embedding 默认 N(0,1))，初始 CE 约 1742
+  # 以下为方案 A 原行为；P1 修正版见 configs/transformer_p1.yaml
+  swiglu_expansion: 4     # null = 标准 8/3 比例（方案 A 的 4 使 FFN 多耗 50% FLOPs）
+  qk_norm: false
+  rope: 1d                # 1d | 2d（图像是二维网格，1d 是错误先验）
+  tie_embeddings: true
+  latent_size: 16
 
 train:
   run_dir: runs/transformer

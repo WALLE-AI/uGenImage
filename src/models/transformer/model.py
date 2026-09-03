@@ -4,26 +4,47 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from constants import PAD_ID, MASK_ID
-from models.transformer.attention import precompute_rope
-from models.transformer.block import TransformerBlock, RMSNorm  # 原实现漏掉 RMSNorm
+from constants import LATENT_SIZE, MASK_ID, PAD_ID
+from models.transformer.attention import precompute_rope, precompute_rope_2d
+from models.transformer.block import RMSNorm, TransformerBlock  # 原实现漏掉 RMSNorm
 
 
 class VisualTransformer(nn.Module):
+    """图像 token 的自回归 / 掩码先验。
+
+    P1 阶段（OPTIMIZATION_PLAN.md）相对方案 A 的结构修正，全部可由 config 开关：
+      rope='2d'         图像是二维网格，一维序号是错误先验
+      qk_norm=True      视觉 token + 低精度训练下 attention logit 易爆炸
+      swiglu_expansion  置 null 时用标准 8/3 比例，而非方案 A 的 4
+      n_kv_heads=n_heads 即 MHA；seq 257 下 GQA 纯损质量
+      tie_embeddings    码本扩到 16384 后解绑代价上升，可配置
+    """
+
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.token_embedding = nn.Embedding(config['vocab_size'], config['dim'])
+        dim = config['dim']
+        self.token_embedding = nn.Embedding(config['vocab_size'], dim)
         self.layers = nn.ModuleList([
-            TransformerBlock(config['dim'], config['n_heads'], config['n_kv_heads'], config['head_dim'])
+            TransformerBlock(dim, config['n_heads'], config['n_kv_heads'],
+                             config['head_dim'],
+                             swiglu_expansion=config.get('swiglu_expansion'),
+                             qk_norm=config.get('qk_norm', False))
             for _ in range(config['n_layers'])
         ])
-        self.norm = RMSNorm(config['dim'])
-        self.lm_head = nn.Linear(config['dim'], config['vocab_size'], bias=False)
-        self.lm_head.weight = self.token_embedding.weight  # weight tying
+        self.norm = RMSNorm(dim)
+        self.lm_head = nn.Linear(dim, config['vocab_size'], bias=False)
+        if config.get('tie_embeddings', True):
+            self.lm_head.weight = self.token_embedding.weight
 
         # RoPE cos/sin 表（原实现只有 apply 函数，从未生成过表，位置编码实际未生效）
-        cos, sin = precompute_rope(config['head_dim'], config['seq_len'])
+        if config.get('rope', '1d') == '2d':
+            grid = config.get('latent_size', LATENT_SIZE)
+            n_prefix = config['seq_len'] - grid * grid
+            assert n_prefix >= 0, f"seq_len={config['seq_len']} 小于 {grid}x{grid}"
+            cos, sin = precompute_rope_2d(config['head_dim'], grid, n_prefix=n_prefix)
+        else:
+            cos, sin = precompute_rope(config['head_dim'], config['seq_len'])
         self.register_buffer('rope_cos', cos, persistent=False)
         self.register_buffer('rope_sin', sin, persistent=False)
 
@@ -41,25 +62,36 @@ class VisualTransformer(nn.Module):
                 if isinstance(m, nn.Linear) and m.bias is not None:
                     nn.init.zeros_(m.bias)
         self.apply(_init)
-        # 残差分支的输出投影按深度缩放，避免 20 层累积后残差流方差爆炸
+        # 残差分支的输出投影按深度缩放，避免多层累积后残差流方差爆炸
         scale = std / math.sqrt(2 * len(self.layers))
         for blk in self.layers:
             nn.init.normal_(blk.attn.wo.weight, mean=0.0, std=scale)
             nn.init.normal_(blk.ffn.w3.weight, mean=0.0, std=scale)
 
-    def forward(self, tokens, attn_mask=None, causal=True):
+    # ---- 前向 --------------------------------------------------------------
+    def _rope(self, start, length, dtype):
+        cos = self.rope_cos[:, :, start:start + length].to(dtype=dtype)
+        sin = self.rope_sin[:, :, start:start + length].to(dtype=dtype)
+        return cos, sin
+
+    def forward(self, tokens, attn_mask=None, causal=True, caches=None, pos=0):
+        """caches: 每层一个 dict，用于增量解码；pos 是当前片段在序列中的起始位置。"""
         T = tokens.shape[1]
-        assert T <= self.rope_cos.shape[2], \
-            f"序列长度 {T} 超过 RoPE 预计算长度 {self.rope_cos.shape[2]}"
-        cos = self.rope_cos[:, :, :T].to(dtype=self.token_embedding.weight.dtype)
-        sin = self.rope_sin[:, :, :T].to(dtype=self.token_embedding.weight.dtype)
+        assert pos + T <= self.rope_cos.shape[2], \
+            f"位置 {pos + T} 超过 RoPE 预计算长度 {self.rope_cos.shape[2]}"
+        cos, sin = self._rope(pos, T, self.token_embedding.weight.dtype)
 
         x = self.token_embedding(tokens)
-        for layer in self.layers:
-            x = layer(x, attn_mask, causal, cos, sin)
+        for i, layer in enumerate(self.layers):
+            x = layer(x, attn_mask, causal, cos, sin,
+                      caches[i] if caches is not None else None)
         x = self.norm(x)
         return self.lm_head(x)
 
+    def new_caches(self):
+        return [{'k': None, 'v': None} for _ in self.layers]
+
+    # ---- 损失 --------------------------------------------------------------
     def compute_loss(self, tokens, mask_ratio=0.2, mask_prob=0.15, use_masked=None):
         """方案 A 的混合目标：以 mask_ratio 的概率走双向掩码预测，否则走因果预测。
 
