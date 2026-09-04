@@ -38,6 +38,8 @@ train:
   mask_ratio: 0.2         # 走双向掩码目标的概率（不是被掩 token 的比例）
   mask_prob: 0.15         # 掩码分支中被掩 token 的比例
   amp: true
+  amp_dtype: bfloat16
+  nan_abort_after: 50
   ema_decay: null
   seed: 0
   resume: auto

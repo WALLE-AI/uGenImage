@@ -72,7 +72,7 @@ def build_loader(cfg, split, batch_size, world_size, rank, shuffle):
 
 
 @torch.no_grad()
-def evaluate(core, loader, device, use_amp, max_batches=50):
+def evaluate(core, loader, device, use_amp, max_batches=50, amp_dtype=torch.float16):
     """验证只跑因果目标，指标才可比（训练时掩码分支是随机触发的）。"""
     core.eval()
     total, n = 0.0, 0
@@ -80,7 +80,7 @@ def evaluate(core, loader, device, use_amp, max_batches=50):
         if i >= max_batches:
             break
         tokens = batch.to(device, non_blocking=True)
-        with torch.amp.autocast('cuda', enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
             loss = core._causal_loss(tokens)
         total += loss.item()
         n += 1
@@ -129,7 +129,12 @@ def main():
                                   lr=cfg.train.lr, betas=(0.9, 0.95))
     scheduler = build_scheduler(optimizer, cfg.train, cfg.train.max_steps)
     use_amp = device.type == 'cuda' and cfg.train.get('amp', True)
-    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    # dim>=2048 时 fp16 的残差流会溢出（实测 PR_A/PR_M 分别在 step 6500/11000 变 NaN，
+    # 而 GradScaler 只能拦梯度溢出，拦不住前向激活溢出）。bf16 动态范围同 fp32，无此问题。
+    amp_dtype = torch.bfloat16 if cfg.train.get('amp_dtype', 'bfloat16') == 'bfloat16' \
+        else torch.float16
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp and amp_dtype == torch.float16)
+    log.info(f"AMP: {'关闭' if not use_amp else str(amp_dtype).replace('torch.','')}")
     ema = ModelEma(core, cfg.train.ema_decay) if cfg.train.get('ema_decay') else None
 
     start_step = 0
@@ -145,6 +150,7 @@ def main():
 
     # ---- 训练 ----
     loss_m, masked_m = AverageMeter(), AverageMeter()
+    nan_streak = n_skipped = 0
     tp = Throughput(cfg.train.max_steps)
     data_iter = infinite(train_loader, train_sampler)
     t_start = time.time()
@@ -160,7 +166,7 @@ def main():
             # 非最后一个累积步不做梯度同步，省掉 accum-1 次 all-reduce
             sync_ctx = wrapped.no_sync() if (world_size > 1 and not last) else contextlib.nullcontext()
             with sync_ctx:
-                with torch.amp.autocast('cuda', enabled=use_amp):
+                with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                     loss = wrapped(tokens, cfg.train.mask_ratio,
                                    cfg.train.get('mask_prob', 0.15), use_masked) / accum
                 scaler.scale(loss).backward()
@@ -169,6 +175,18 @@ def main():
 
         scaler.unscale_(optimizer)
         gnorm = torch.nn.utils.clip_grad_norm_(core.parameters(), cfg.train.grad_clip)
+        if not torch.isfinite(gnorm):
+            # 丢弃这一步而不是把 NaN 写进权重
+            optimizer.zero_grad(set_to_none=True)
+            nan_streak += 1
+            n_skipped += 1
+            scaler.update()
+            scheduler.step()
+            if nan_streak >= int(cfg.train.get('nan_abort_after', 50)):
+                log.info(f"连续 {nan_streak} 步梯度非有限，训练已发散，主动中止于 step {step+1}")
+                break
+            continue
+        nan_streak = 0
         scaler.step(optimizer)
         scaler.update()
         scheduler.step()
@@ -180,10 +198,11 @@ def main():
             rate, eta = tp.update(gstep, per_rank_bs * world_size * accum)
             log.metrics(gstep, loss=loss_m.avg, ppl=math.exp(min(loss_m.avg, 20)),
                         lr=optimizer.param_groups[0]['lr'], grad_norm=float(gnorm),
-                        masked_frac=masked_m.avg, seq_per_s=rate, eta=eta)
+                        masked_frac=masked_m.avg, skipped=n_skipped,
+                        seq_per_s=rate, eta=eta)
 
         if gstep % cfg.train.eval_every == 0 or gstep == cfg.train.max_steps:
-            val = evaluate(core, val_loader, device, use_amp, cfg.train.eval_batches)
+            val = evaluate(core, val_loader, device, use_amp, cfg.train.eval_batches, amp_dtype)
             val = all_reduce_mean(val, device)
             log.metrics(gstep, val_loss=val, val_ppl=math.exp(min(val, 20)))
 

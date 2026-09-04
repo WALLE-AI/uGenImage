@@ -39,6 +39,8 @@ train:
   mask_ratio: 0.2
   mask_prob: 0.15
   amp: true
+  amp_dtype: bfloat16     # dim>=2048 时 fp16 残差流会溢出导致 NaN
+  nan_abort_after: 50     # 连续 N 步梯度非有限就中止，避免空跑
   ema_decay: null
   seed: 0
   resume: auto
